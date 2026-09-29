@@ -1,0 +1,10 @@
+{
+  "name": "出行计划",
+  "short_name": "出行计划",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f2ea",
+  "theme_color": "#f6f2ea",
+  "lang": "zh-CN",
+  "icons": []
+}
