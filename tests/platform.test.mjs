@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { calculate } from '../src/expenseSettlement.ts'
-import { membersChanged, modelsUrl, validAdminUsername, validAiUrl, validAmapCredential, validConfig, validExpense } from '../server/trip-data.mjs'
+import { databaseUrlFromFields, membersChanged, modelsUrl, validAdminUsername, validAiUrl, validAmapCredential, validConfig, validExpense } from '../server/trip-data.mjs'
 
 const config = {
   title: '周末自驾', subtitle: '两天轻松出行',
@@ -14,6 +14,13 @@ test('install and admin configuration validates members, days and map points', (
   assert.equal(validConfig({ ...config, members: [config.members[0], config.members[0]] }), false)
   assert.equal(validConfig({ ...config, days: [{ ...config.days[0], legs: [{ ...config.days[0].legs[0], destinationPoint: [200, 29.9] }] }] }), false)
   assert.equal(validConfig({ ...config, days: [{ ...config.days[0], legs: [{ ...config.days[0].legs[0], destinationPoint: [0, 0] }] }] }), false)
+})
+
+test('installer accepts database fields and encodes a password safely', () => {
+  const url = databaseUrlFromFields({ host: '127.0.0.1', port: 5432, name: 'tripweave', user: 'tripweave', password: 'a:b@c' })
+  assert.equal(new URL(url).password, 'a%3Ab%40c')
+  assert.equal(databaseUrlFromFields({ host: 'bad/host', port: 5432, name: 'tripweave', user: 'tripweave', password: 'pass' }), null)
+  assert.equal(databaseUrlFromFields({ host: '127.0.0.1', port: 0, name: 'tripweave', user: 'tripweave', password: 'pass' }), null)
 })
 
 test('map credentials accept only complete AMap keys', () => {

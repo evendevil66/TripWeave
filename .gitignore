@@ -8,4 +8,6 @@ dist/
 *.zip
 *.dump
 *.sql
+data/
+docs/design-system.md
 .readme-*.js

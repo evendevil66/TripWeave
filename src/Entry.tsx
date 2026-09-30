@@ -33,6 +33,6 @@ export default function Entry({ unlocked, members, onUnlock, onSelect }: { unloc
         <form className="entry-form" onSubmit={unlock}><label htmlFor="trip-code">访问码</label><input id="trip-code" type="text" value={code} onChange={(event) => setCode(event.target.value)} autoComplete="off" autoFocus required placeholder="请输入本次出行的目的地" /><button type="submit" disabled={busy}>{busy ? '验证中…' : '进入行程'}</button></form>
       </>}
       {error && <p className="form-error" role="alert">{error}</p>}
-    </div><p className="entry-footer">行程 · 路线 · 共同账本</p>
+    </div><p className="entry-footer">© 2026 杭州猫萌特科技有限公司 · TripWeave</p>
   </main>
 }

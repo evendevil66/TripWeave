@@ -1,11 +1,17 @@
 import pg from 'pg'
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 if (existsSync('.env.local')) process.loadEnvFile('.env.local')
 if (existsSync('.env.ai.local')) process.loadEnvFile('.env.ai.local')
 
-const pool = process.env.DATABASE_URL ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 5 }) : null
+const dataDir = resolve('data')
+const databaseFile = resolve(dataDir, 'database.json')
+const installLock = resolve(dataDir, 'install.lock')
+const savedDatabaseUrl = existsSync(databaseFile) ? JSON.parse(readFileSync(databaseFile, 'utf8')).databaseUrl : ''
+let pool = savedDatabaseUrl || process.env.DATABASE_URL ? new pg.Pool({ connectionString: savedDatabaseUrl || process.env.DATABASE_URL, max: 5, connectionTimeoutMillis: 5000 }) : null
+let installInProgress = false
 const tripId = process.env.TRIP_ID || 'default'
 const defaultMembers = [
   { id: 'lin', name: '小林', shares: 1 },
@@ -142,9 +148,27 @@ function verifySecret(value, stored) {
 function sign(value, secret) { return createHmac('sha256', secret).update(value).digest('base64url') }
 
 async function installation() {
+  if (!pool) return null
   const db = await database()
   const result = await db.query('SELECT * FROM app_installation WHERE id = 1')
   return result.rows[0] ?? null
+}
+
+export function databaseUrlFromFields(value) {
+  if (!value || typeof value !== 'object') return null
+  const { host, port, name, user, password } = value
+  if (typeof host !== 'string' || !/^[a-zA-Z0-9._-]{1,253}$/.test(host) || typeof name !== 'string' || !/^[a-zA-Z0-9_-]{1,63}$/.test(name) || typeof user !== 'string' || !/^[a-zA-Z0-9_-]{1,63}$/.test(user) || typeof password !== 'string' || !password || password.length > 256) return null
+  const portNumber = Number(port)
+  if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) return null
+  try {
+    const url = new URL('postgresql://localhost')
+    url.hostname = host
+    url.port = String(portNumber)
+    url.pathname = `/${name}`
+    url.username = user
+    url.password = password
+    return url.hostname ? url.toString() : null
+  } catch { return null }
 }
 
 export async function amapCredentials() {
@@ -327,26 +351,53 @@ export async function handleTripData(request, response) {
       if (origin && new URL(origin).host !== host) { send(response, 403, { error: '请求来源无效' }); return true }
       if (request.method !== 'DELETE' && request.headers['content-type']?.split(';')[0] !== 'application/json') { send(response, 415, { error: '请使用 JSON 请求' }); return true }
     }
-    const installed = await installation()
+    const locked = existsSync(installLock)
+    const installed = locked && path === '/api/install/status' ? true : await installation()
     if (path === '/api/install/status' && request.method === 'GET') {
-      send(response, 200, { installed: !!installed, ready: !!process.env.INSTALL_TOKEN })
+      send(response, 200, { installed: !!installed })
       return true
     }
     if (path === '/api/install' && request.method === 'POST') {
-      if (installed) { send(response, 409, { error: '系统已安装' }); return true }
+      if (locked || installed || installInProgress) { send(response, 409, { error: '系统已安装或正在安装' }); return true }
       if (!allowAuthAttempt(request, 'install')) { send(response, 429, { error: '尝试次数过多，请稍后再试' }); return true }
-      const { installToken, adminUsername, adminPassword, accessCode: code, config } = await bodyJson(request)
-      const expectedToken = process.env.INSTALL_TOKEN
-      if (!expectedToken || typeof installToken !== 'string' || !timingSafeEqual(createHash('sha256').update(installToken).digest(), createHash('sha256').update(expectedToken).digest())) { send(response, 403, { error: '安装令牌不正确或未配置' }); return true }
+      const { database: databaseFields, adminUsername, adminPassword, accessCode: code, config } = await bodyJson(request)
+      const databaseUrl = databaseUrlFromFields(databaseFields)
+      if (!pool && !databaseUrl) { send(response, 400, { error: '请填写有效的 PostgreSQL 连接信息' }); return true }
       if (!validAdminUsername(adminUsername) || typeof adminPassword !== 'string' || adminPassword.length < 8 || adminPassword.length > 128 || typeof code !== 'string' || code.trim().length < 2 || code.length > 100 || !validConfig(config)) { send(response, 400, { error: '请检查管理员用户名、密码、访问码和行程信息' }); return true }
-      const db = await database()
-      const existingPayers = await db.query('SELECT DISTINCT payer FROM trip_expenses WHERE trip_id = $1 AND deleted_at IS NULL', [tripId])
-      if (existingPayers.rows.some((row) => !config.members.some((member) => member.id === row.payer))) { send(response, 409, { error: '现有账本包含其他成员，请使用原行程模板安装' }); return true }
-      const result = await db.query(`INSERT INTO app_installation (id, admin_username, admin_hash, access_hash, session_secret, config)
-        VALUES (1, $1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING RETURNING id`,
-      [adminUsername, hashSecret(adminPassword), hashSecret(code), randomBytes(32).toString('hex'), config])
-      if (!result.rowCount) { send(response, 409, { error: '系统已安装' }); return true }
-      send(response, 201, { installed: true })
+      if (installInProgress || existsSync(installLock)) { send(response, 409, { error: '系统已安装或正在安装' }); return true }
+      installInProgress = true
+      try {
+        if (!pool) {
+          const candidate = new pg.Pool({ connectionString: databaseUrl, max: 5, connectionTimeoutMillis: 5000 })
+          try { await candidate.query('SELECT 1') }
+          catch { await candidate.end(); send(response, 400, { error: '数据库连接失败，请检查地址、账号和密码' }); return true }
+          pool = candidate
+          ready = undefined
+        }
+        const db = await database()
+        const existing = await db.query('SELECT id FROM app_installation WHERE id = 1')
+        if (existing.rowCount || existsSync(installLock)) { send(response, 409, { error: '系统已安装' }); return true }
+        const existingPayers = await db.query('SELECT DISTINCT payer FROM trip_expenses WHERE trip_id = $1 AND deleted_at IS NULL', [tripId])
+        if (existingPayers.rows.some((row) => !config.members.some((member) => member.id === row.payer))) { send(response, 409, { error: '现有账本包含其他成员，请使用原行程模板安装' }); return true }
+        if (!existsSync(databaseFile) && !process.env.DATABASE_URL) {
+          mkdirSync(dataDir, { recursive: true })
+          writeFileSync(databaseFile, JSON.stringify({ databaseUrl }), { mode: 0o600, flag: 'wx' })
+        }
+        const result = await db.query(`INSERT INTO app_installation (id, admin_username, admin_hash, access_hash, session_secret, config)
+          VALUES (1, $1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING RETURNING id`,
+        [adminUsername, hashSecret(adminPassword), hashSecret(code), randomBytes(32).toString('hex'), config])
+        if (!result.rowCount) { send(response, 409, { error: '系统已安装' }); return true }
+        mkdirSync(dataDir, { recursive: true })
+        writeFileSync(installLock, new Date().toISOString(), { mode: 0o600, flag: 'wx' })
+        send(response, 201, { installed: true })
+      } finally {
+        installInProgress = false
+        if (!existsSync(databaseFile) && !process.env.DATABASE_URL && !existsSync(installLock) && pool) {
+          await pool.end()
+          pool = null
+          ready = undefined
+        }
+      }
       return true
     }
     if (!installed) { send(response, 409, { error: '系统尚未安装', installRequired: true }); return true }

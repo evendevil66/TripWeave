@@ -303,6 +303,7 @@ function App() {
 
       <footer className="footer-note">
         {locationState === 'error' ? '定位失败，请检查浏览器权限；仍可查看预设路线。' : position ? '已获取当前位置，可在当日地图中切换为从当前位置出发。' : '地图展示预设路线；获取位置后可查看从当前位置出发的路线。'}
+        <span className="legal-note">© 2026 杭州猫萌特科技有限公司 · TripWeave</span>
       </footer>
     </main>
   )

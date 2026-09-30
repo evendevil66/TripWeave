@@ -279,6 +279,7 @@ h1 em { color: var(--accent); font-style: normal; }
 .admin-savebar { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end; gap: 15px; padding: 12px 0; border-top: 1px solid var(--line); background: var(--paper); }
 .admin-savebar p { margin: 0 auto 0 0; }
 .admin-success { color: var(--green); font-size: 12px; }
+.legal-note { display: block; margin-top: 24px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 
 @media (max-width: 600px) {
   .admin-header { align-items: start; }
