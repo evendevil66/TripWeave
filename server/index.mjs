@@ -2,7 +2,7 @@ import { createServer } from 'node:http'
 import { readFile, stat } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import { handleAmapRequest } from './amap.ts'
-import { handleTripData } from './trip-data.mjs'
+import { handleTripData, startTrafficScheduler } from './trip-data.mjs'
 
 const root = resolve('dist')
 const mime = {
@@ -46,4 +46,5 @@ createServer(async (request, response) => {
   }
 }).listen(Number(process.env.PORT ?? 4173), '0.0.0.0', () => {
   console.log(`Trip planner ready at http://localhost:${process.env.PORT ?? 4173}`)
+  startTrafficScheduler()
 })

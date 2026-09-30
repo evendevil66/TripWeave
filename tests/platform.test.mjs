@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { calculate } from '../src/expenseSettlement.ts'
-import { databaseUrlFromFields, membersChanged, modelsUrl, validAdminUsername, validAiUrl, validAmapCredential, validConfig, validExpense } from '../server/trip-data.mjs'
+import { databaseUrlFromFields, membersChanged, modelsUrl, validAdminUsername, validAiUrl, validAmapCredential, validConfig, validExpense, webServiceEvidence } from '../server/trip-data.mjs'
 
 const config = {
   title: '周末自驾', subtitle: '两天轻松出行',
@@ -27,6 +27,14 @@ test('map credentials accept only complete AMap keys', () => {
   assert.equal(validAmapCredential('a'.repeat(32)), true)
   assert.equal(validAmapCredential('a'.repeat(31)), false)
   assert.equal(validAmapCredential('a'.repeat(31) + '!'), false)
+})
+
+test('Web Service driving data becomes bounded traffic evidence for AI', () => {
+  const evidence = webServiceEvidence({ status: '1', route: { paths: [{ distance: '12000', duration: '1200', steps: [{ road: '示例道路', distance: '12000', tmcs: [{ status: '缓行', distance: '3000' }] }] }] } }, '路段', '2026-09-30T00:00:00.000Z')
+  assert.equal(evidence.routes[0].covered, 3000)
+  assert.deepEqual(evidence.routes[0].mainRoads, ['示例道路'])
+  assert.equal(evidence.routes[0].traffic[0].status, '缓行')
+  assert.throws(() => webServiceEvidence({ status: '0' }, '路段', '2026-09-30T00:00:00.000Z'))
 })
 
 test('admin names and AI endpoints are validated before persistence or model discovery', () => {

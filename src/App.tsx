@@ -246,8 +246,8 @@ function App() {
           {activeDay.tags.map((tag) => <span className="tag" key={tag}>{tag}</span>)}
         </div>
 
-        {activeDay.legs.map((leg) => (
-          <MapPanel key={`${activeDay.date}-${leg.label}`} origin={leg.origin} destination={leg.destination} originPoint={leg.originPoint} destinationPoint={leg.destinationPoint} routeLabel={leg.label} position={position} />
+        {activeDay.legs.map((leg, legIndex) => (
+          <MapPanel key={`${activeDay.date}-${leg.label}`} dayIndex={activeIndex} legIndex={legIndex} origin={leg.origin} destination={leg.destination} originPoint={leg.originPoint} destinationPoint={leg.destinationPoint} routeLabel={leg.label} position={position} />
         ))}
 
         <div className="plan-list">

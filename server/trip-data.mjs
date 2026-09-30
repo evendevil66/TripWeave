@@ -40,9 +40,14 @@ async function database() {
         config jsonb NOT NULL,
         amap_js_key text,
         amap_security_code text,
+        amap_web_service_key text,
+        traffic_refresh_minutes integer NOT NULL DEFAULT 5,
+        traffic_auto_enabled boolean NOT NULL DEFAULT true,
         ai_url text,
         ai_api_key text,
         ai_model text,
+        ai_refresh_minutes integer NOT NULL DEFAULT 10,
+        ai_auto_enabled boolean NOT NULL DEFAULT true,
         installed_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()
       );
@@ -69,15 +74,31 @@ async function database() {
         expense_id bigint,
         snapshot jsonb,
         created_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS trip_route_cache (
+        trip_id text NOT NULL,
+        day_index integer NOT NULL,
+        leg_index integer NOT NULL,
+        signature text NOT NULL,
+        evidence jsonb,
+        fetched_at timestamptz,
+        advice jsonb,
+        advice_at timestamptz,
+        PRIMARY KEY (trip_id, day_index, leg_index)
       )
     `)
     await pool.query(`ALTER TABLE trip_expenses ADD COLUMN IF NOT EXISTS allocation jsonb`)
     await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS amap_js_key text')
     await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS amap_security_code text')
+    await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS amap_web_service_key text')
+    await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS traffic_refresh_minutes integer NOT NULL DEFAULT 5')
+    await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS traffic_auto_enabled boolean NOT NULL DEFAULT true')
     await pool.query("ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS admin_username text NOT NULL DEFAULT 'admin'")
     await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS ai_url text')
     await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS ai_api_key text')
     await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS ai_model text')
+    await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS ai_refresh_minutes integer NOT NULL DEFAULT 10')
+    await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS ai_auto_enabled boolean NOT NULL DEFAULT true')
     await pool.query('ALTER TABLE trip_expenses DROP CONSTRAINT IF EXISTS trip_expenses_payer_check')
   })().catch((error) => { ready = undefined; throw error })
   await ready
@@ -286,12 +307,12 @@ function aiSettings(installed) {
   }
 }
 
-async function trafficAdvice(evidence, installed) {
+async function trafficAdvice(evidence, installed, force = false) {
   const { url, key, model } = aiSettings(installed)
   if (!key) throw new Error('AI 服务端密钥尚未配置')
-  const cacheKey = createHash('sha256').update(JSON.stringify({ url, model, routeLabel: evidence.routeLabel, routes: evidence.routes })).digest('hex')
+  const cacheKey = createHash('sha256').update(JSON.stringify({ url, model, source: evidence.source, routeLabel: evidence.routeLabel, routes: evidence.routes })).digest('hex')
   const cached = trafficAdviceCache.get(cacheKey)
-  if (cached && Date.now() - Date.parse(cached.updatedAt) < 5 * 60 * 1000) return cached
+  if (!force && cached && Date.now() - Date.parse(cached.updatedAt) < 5 * 60 * 1000) return cached
   if (trafficAdvicePending.has(cacheKey)) return trafficAdvicePending.get(cacheKey)
 
   const pending = (async () => {
@@ -316,7 +337,7 @@ async function trafficAdvice(evidence, installed) {
       temperature: 0.2,
       max_tokens: 280,
       messages: [
-        { role: 'system', content: '你是自驾路况助手。只依据用户提供的高德驾车路线数据，给出简短、具体的中文建议。距离字段均为公里，时间字段均为分钟；coveredKm 是有路况状态的里程，mainRoads 是实际途经主路，不代表这些主路拥堵。路线按顺序编号，第一条为推荐路线，其余为可切换的备选路线；地图每次只显示选中路线。只有数据中确实有备选路线时，才可比较时间、道路并建议切换，明确引用路线编号；不得虚构道路、管制、事故、天气、节省时间或未提供的实时信息。未提供通行数据的路段不得推断畅通，也不能预测国庆未来路况。若数据不足，明确说明无法判断。输出一到两句话纯文本，距离只能用公里，时间只能用分钟，不使用米和秒，不使用 Markdown。' },
+        { role: 'system', content: `你是自驾路况助手。只依据用户提供的高德驾车路线数据，给出简短、具体的中文建议。距离字段均为公里，时间字段均为分钟；coveredKm 是有路况状态的里程，mainRoads 是实际途经主路，不代表这些主路拥堵。${evidence.source === 'web-service' ? '这些路线由高德 Web 服务返回，可能和浏览器地图的备选路线不同。可以比较后台路线的道路和用时，但不要叫用户切换到浏览器中的某个路线编号；建议用户在地图中核对对应道路。' : '路线按顺序编号，第一条为推荐路线，其余为可切换的备选路线；地图每次只显示选中路线。只有数据中确实有备选路线时，才可比较时间、道路并建议切换，明确引用路线编号。'}不得虚构道路、管制、事故、天气、节省时间或未提供的实时信息。未提供通行数据的路段不得推断畅通，也不能预测国庆未来路况。若数据不足，明确说明无法判断。输出一到两句话纯文本，距离只能用公里，时间只能用分钟，不使用米和秒，不使用 Markdown。` },
         { role: 'user', content: JSON.stringify(aiEvidence) },
       ],
     }),
@@ -327,13 +348,109 @@ async function trafficAdvice(evidence, installed) {
   const advice = data.choices?.[0]?.message?.content?.trim()
   if (typeof advice !== 'string' || !advice) throw new Error('AI 未返回有效建议')
   if (trafficAdviceCache.size > 100) trafficAdviceCache.clear()
-  const result = { advice: advice.slice(0, 500), updatedAt: new Date().toISOString(), sourceAt: evidence.sourceAt }
+  const result = { advice: advice.slice(0, 500), updatedAt: new Date().toISOString(), sourceAt: evidence.sourceAt, source: evidence.source || 'js-api' }
   trafficAdviceCache.set(cacheKey, result)
   return result
   })()
   trafficAdvicePending.set(cacheKey, pending)
   try { return await pending }
   finally { trafficAdvicePending.delete(cacheKey) }
+}
+
+function legSignature(leg) {
+  return createHash('sha256').update(JSON.stringify([leg.label, leg.originPoint, leg.destinationPoint])).digest('hex')
+}
+
+export function webServiceEvidence(data, routeLabel, sourceAt) {
+  if (data?.status !== '1' || !Array.isArray(data.route?.paths) || !data.route.paths.length) throw new Error('高德未返回有效路线')
+  const routes = data.route.paths.slice(0, 3).map((path) => {
+    const traffic = new Map()
+    const roads = new Map()
+    const mainRoads = new Map()
+    for (const step of path.steps ?? []) {
+      const road = typeof step.road === 'string' ? step.road.slice(0, 80) : ''
+      if (road) mainRoads.set(road, (mainRoads.get(road) ?? 0) + Number(step.distance || 0))
+      for (const segment of step.tmcs ?? []) {
+        const distance = Number(segment.distance)
+        const status = typeof segment.status === 'string' ? segment.status.slice(0, 12) : ''
+        if (!status || !Number.isFinite(distance) || distance <= 0) continue
+        traffic.set(status, (traffic.get(status) ?? 0) + distance)
+        if (road) {
+          const key = `${road}\0${status}`
+          roads.set(key, { road, status, distance: (roads.get(key)?.distance ?? 0) + distance })
+        }
+      }
+    }
+    return {
+      distance: Number(path.distance), time: Number(path.duration),
+      covered: [...traffic.values()].reduce((sum, value) => sum + value, 0),
+      mainRoads: [...mainRoads].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([road]) => road),
+      traffic: [...traffic].map(([status, distance]) => ({ status, distance })),
+      roads: [...roads.values()].sort((a, b) => b.distance - a.distance).slice(0, 20),
+    }
+  })
+  const evidence = { routeLabel, sourceAt, source: 'web-service', routes }
+  if (!validTrafficEvidence(evidence)) throw new Error('高德路线数据格式无效')
+  return evidence
+}
+
+let trafficRefreshPending = false
+export async function refreshTrafficCache({ force = false, target } = {}) {
+  if ((trafficRefreshPending && !force) || !pool) return
+  if (!force) trafficRefreshPending = true
+  try {
+    const installed = await installation()
+    const key = installed?.amap_web_service_key || process.env.AMAP_WEB_SERVICE_KEY
+    if (!installed || !key) return
+    const db = await database()
+    const aiJobs = []
+    for (const [dayIndex, day] of installed.config.days.entries()) for (const [legIndex, leg] of day.legs.entries()) {
+      if (target && (target.dayIndex !== dayIndex || target.legIndex !== legIndex)) continue
+      const signature = legSignature(leg)
+      let current = (await db.query('SELECT * FROM trip_route_cache WHERE trip_id = $1 AND day_index = $2 AND leg_index = $3', [tripId, dayIndex, legIndex])).rows[0]
+      const routeDue = (force || installed.traffic_auto_enabled) && (force || current?.signature !== signature || !current?.fetched_at || Date.now() - new Date(current.fetched_at).getTime() >= installed.traffic_refresh_minutes * 60_000)
+      if (routeDue) {
+        try {
+          const url = new URL('https://restapi.amap.com/v3/direction/driving')
+          url.searchParams.set('key', key)
+          url.searchParams.set('origin', leg.originPoint.join(','))
+          url.searchParams.set('destination', leg.destinationPoint.join(','))
+          url.searchParams.set('extensions', 'all')
+          url.searchParams.set('strategy', '10')
+          const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
+          if (!response.ok) throw new Error(`高德请求失败：${response.status}`)
+          const evidence = webServiceEvidence(await response.json(), leg.label, new Date().toISOString())
+          const result = await db.query(`INSERT INTO trip_route_cache (trip_id, day_index, leg_index, signature, evidence, fetched_at)
+            VALUES ($1, $2, $3, $4, $5, now())
+            ON CONFLICT (trip_id, day_index, leg_index) DO UPDATE SET signature = EXCLUDED.signature,
+              evidence = EXCLUDED.evidence, fetched_at = EXCLUDED.fetched_at,
+              advice = CASE WHEN trip_route_cache.signature = EXCLUDED.signature THEN trip_route_cache.advice ELSE NULL END,
+              advice_at = CASE WHEN trip_route_cache.signature = EXCLUDED.signature THEN trip_route_cache.advice_at ELSE NULL END
+            RETURNING *`, [tripId, dayIndex, legIndex, signature, evidence])
+          current = result.rows[0]
+        } catch (error) { console.error(`Traffic refresh failed for day ${dayIndex + 1} leg ${legIndex + 1}:`, error.message) }
+      }
+      const evidenceFresh = current?.fetched_at && Date.now() - new Date(current.fetched_at).getTime() <= (installed.traffic_refresh_minutes + 1) * 60_000
+      if (current?.signature !== signature || !current?.evidence || !evidenceFresh || !aiSettings(installed).key || !aiSettings(installed).url || !aiSettings(installed).model) continue
+      const adviceDue = (force || installed.ai_auto_enabled) && (force || !current.advice_at || Date.now() - new Date(current.advice_at).getTime() >= installed.ai_refresh_minutes * 60_000)
+      if (adviceDue) {
+        aiJobs.push((async () => {
+          try {
+            const advice = await trafficAdvice(current.evidence, installed, force)
+            await db.query('UPDATE trip_route_cache SET advice = $4, advice_at = now() WHERE trip_id = $1 AND day_index = $2 AND leg_index = $3 AND signature = $5', [tripId, dayIndex, legIndex, advice, signature])
+          } catch (error) { console.error(`AI refresh failed for day ${dayIndex + 1} leg ${legIndex + 1}:`, error.message) }
+        })())
+      }
+    }
+    await Promise.all(aiJobs)
+  } catch (error) { console.error('Traffic scheduler failed:', error.message) }
+  finally { if (!force) trafficRefreshPending = false }
+}
+
+export function startTrafficScheduler() {
+  const timer = setInterval(() => { void refreshTrafficCache() }, 60_000)
+  timer.unref()
+  void refreshTrafficCache()
 }
 
 export async function handleTripData(request, response) {
@@ -439,22 +556,26 @@ export async function handleTripData(request, response) {
       }
       if (path === '/api/admin/ai-settings' && request.method === 'GET') {
         const current = aiSettings(installed)
-        send(response, 200, { url: current.url, model: current.model, keyConfigured: !!current.key })
+        send(response, 200, { url: current.url, model: current.model, keyConfigured: !!current.key, refreshMinutes: installed.ai_refresh_minutes, autoEnabled: installed.ai_auto_enabled })
         return true
       }
       if (path === '/api/admin/ai-settings' && request.method === 'PUT') {
-        const { url, apiKey, model } = await bodyJson(request)
+        const { url, apiKey, model, refreshMinutes, autoEnabled } = await bodyJson(request)
         if ((url !== undefined && !validAiUrl(url)) || (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey.trim() || apiKey.length > 500)) ||
-          (model !== undefined && (typeof model !== 'string' || !/^[a-zA-Z0-9_.:/-]{1,120}$/.test(model)))) {
+          (model !== undefined && (typeof model !== 'string' || !/^[a-zA-Z0-9_.:/-]{1,120}$/.test(model))) ||
+          (refreshMinutes !== undefined && (!Number.isInteger(refreshMinutes) || refreshMinutes < 1 || refreshMinutes > 1440)) ||
+          (autoEnabled !== undefined && typeof autoEnabled !== 'boolean')) {
           send(response, 400, { error: '请检查 AI 接口地址、API Key 和模型名称' }); return true
         }
         const db = await database()
         const result = await db.query(`UPDATE app_installation SET ai_url = COALESCE($1, ai_url),
-          ai_api_key = COALESCE($2, ai_api_key), ai_model = COALESCE($3, ai_model), updated_at = now()
-          WHERE id = 1 RETURNING *`, [url ?? null, apiKey ?? null, model ?? null])
+          ai_api_key = COALESCE($2, ai_api_key), ai_model = COALESCE($3, ai_model),
+          ai_refresh_minutes = COALESCE($4, ai_refresh_minutes), ai_auto_enabled = COALESCE($5, ai_auto_enabled), updated_at = now()
+          WHERE id = 1 RETURNING *`, [url ?? null, apiKey ?? null, model ?? null, refreshMinutes ?? null, autoEnabled ?? null])
         trafficAdviceCache.clear()
         const current = aiSettings(result.rows[0])
-        send(response, 200, { url: current.url, model: current.model, keyConfigured: !!current.key })
+        send(response, 200, { url: current.url, model: current.model, keyConfigured: !!current.key, refreshMinutes: result.rows[0].ai_refresh_minutes, autoEnabled: result.rows[0].ai_auto_enabled })
+        void refreshTrafficCache()
         return true
       }
       if (path === '/api/admin/ai-models' && request.method === 'POST') {
@@ -476,20 +597,25 @@ export async function handleTripData(request, response) {
         return true
       }
       if (path === '/api/admin/map-settings' && request.method === 'GET') {
-        send(response, 200, { key: installed.amap_js_key || process.env.AMAP_JS_KEY || '', securityConfigured: !!(installed.amap_security_code || process.env.AMAP_SECURITY_CODE) })
+        send(response, 200, { key: installed.amap_js_key || process.env.AMAP_JS_KEY || '', securityConfigured: !!(installed.amap_security_code || process.env.AMAP_SECURITY_CODE), webServiceConfigured: !!(installed.amap_web_service_key || process.env.AMAP_WEB_SERVICE_KEY), refreshMinutes: installed.traffic_refresh_minutes, autoEnabled: installed.traffic_auto_enabled })
         return true
       }
       if (path === '/api/admin/map-settings' && request.method === 'PUT') {
-        const { key, securityCode } = await bodyJson(request)
-        if ((key !== undefined && !validAmapCredential(key)) || (securityCode !== undefined && !validAmapCredential(securityCode))) {
+        const { key, securityCode, webServiceKey, refreshMinutes, autoEnabled } = await bodyJson(request)
+        if ((key !== undefined && !validAmapCredential(key)) || (securityCode !== undefined && !validAmapCredential(securityCode)) ||
+          (webServiceKey !== undefined && !validAmapCredential(webServiceKey)) ||
+          (refreshMinutes !== undefined && (!Number.isInteger(refreshMinutes) || refreshMinutes < 1 || refreshMinutes > 1440)) ||
+          (autoEnabled !== undefined && typeof autoEnabled !== 'boolean')) {
           send(response, 400, { error: '高德 Key 和安全密钥均应为 32 位字母或数字' }); return true
         }
         const db = await database()
         const result = await db.query(`UPDATE app_installation SET amap_js_key = COALESCE($1, amap_js_key),
-          amap_security_code = COALESCE($2, amap_security_code), updated_at = now() WHERE id = 1
-          RETURNING amap_js_key, amap_security_code`, [key ?? null, securityCode ?? null])
+          amap_security_code = COALESCE($2, amap_security_code), amap_web_service_key = COALESCE($3, amap_web_service_key),
+          traffic_refresh_minutes = COALESCE($4, traffic_refresh_minutes), traffic_auto_enabled = COALESCE($5, traffic_auto_enabled),
+          updated_at = now() WHERE id = 1 RETURNING *`, [key ?? null, securityCode ?? null, webServiceKey ?? null, refreshMinutes ?? null, autoEnabled ?? null])
         cachedAmapCredentials = undefined
-        send(response, 200, { key: result.rows[0].amap_js_key || process.env.AMAP_JS_KEY || '', securityConfigured: !!(result.rows[0].amap_security_code || process.env.AMAP_SECURITY_CODE) })
+        send(response, 200, { key: result.rows[0].amap_js_key || process.env.AMAP_JS_KEY || '', securityConfigured: !!(result.rows[0].amap_security_code || process.env.AMAP_SECURITY_CODE), webServiceConfigured: !!(result.rows[0].amap_web_service_key || process.env.AMAP_WEB_SERVICE_KEY), refreshMinutes: result.rows[0].traffic_refresh_minutes, autoEnabled: result.rows[0].traffic_auto_enabled })
+        void refreshTrafficCache()
         return true
       }
       if (path === '/api/admin/config' && request.method === 'GET') { send(response, 200, { config: publicConfig(installed) }); return true }
@@ -569,6 +695,20 @@ export async function handleTripData(request, response) {
       return true
     }
     if (!current.user) { send(response, 403, { error: '请先选择用户' }); return true }
+    if (path === '/api/trip/route-cache' && ['GET', 'POST'].includes(request.method)) {
+      const params = new URL(request.url ?? '/', 'http://localhost').searchParams
+      const dayIndex = Number(params.get('day'))
+      const legIndex = Number(params.get('leg'))
+      const leg = Number.isInteger(dayIndex) && Number.isInteger(legIndex) && dayIndex >= 0 && legIndex >= 0 ? installed.config.days[dayIndex]?.legs[legIndex] : null
+      if (!leg) { send(response, 404, { error: '路线不存在' }); return true }
+      const configured = !!(installed.amap_web_service_key || process.env.AMAP_WEB_SERVICE_KEY)
+      if (request.method === 'POST' && configured) await refreshTrafficCache({ force: true, target: { dayIndex, legIndex } })
+      const db = await database()
+      const row = (await db.query('SELECT signature, evidence, fetched_at, advice, advice_at FROM trip_route_cache WHERE trip_id = $1 AND day_index = $2 AND leg_index = $3', [tripId, dayIndex, legIndex])).rows[0]
+      const valid = row?.signature === legSignature(leg)
+      send(response, 200, { configured, evidence: valid ? row.evidence : null, fetchedAt: valid ? row.fetched_at : null, advice: valid ? row.advice : null, adviceAt: valid ? row.advice_at : null, trafficRefreshMinutes: installed.traffic_refresh_minutes, aiRefreshMinutes: installed.ai_refresh_minutes, trafficAutoEnabled: installed.traffic_auto_enabled, aiAutoEnabled: installed.ai_auto_enabled })
+      return true
+    }
     if (path === '/api/trip/traffic-advice' && request.method === 'POST') {
       const evidence = await bodyJson(request)
       if (!validTrafficEvidence(evidence)) { send(response, 400, { error: '高德路线数据格式无效' }); return true }
