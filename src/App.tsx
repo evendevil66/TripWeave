@@ -13,6 +13,16 @@ function formatMoney(value: number) {
   return value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+function isToday(value: string, today = new Date()) {
+  const match = value.trim().match(/^(?:(\d{4})[-./])?(\d{1,2})[-./](\d{1,2})$/)
+  return !!match && (!match[1] || Number(match[1]) === today.getFullYear()) && Number(match[2]) === today.getMonth() + 1 && Number(match[3]) === today.getDate()
+}
+
+function initialDayIndex(days: Day[]) {
+  const index = days.findIndex((day) => isToday(day.date))
+  return index < 0 ? 0 : index
+}
+
 function openMap(day: Day, provider: 'amap' | 'baidu', position?: Position) {
   const address = `${day.stay?.hotel}，${day.stay?.address}`
   let url: string
@@ -51,6 +61,7 @@ function App() {
       if (data.authenticated) {
         const result = await api<{ config: TripConfig }>('/api/trip/config')
         setConfig(result.config)
+        setActiveIndex(initialDayIndex(result.config.days))
         localStorage.setItem('trip-offline-config', JSON.stringify(result.config))
       }
       setUser(data.user)
@@ -61,7 +72,8 @@ function App() {
         const cached = localStorage.getItem('trip-offline-config')
         const cachedUser = localStorage.getItem('trip-offline-user')
         if (cached && cachedUser) {
-          setConfig(JSON.parse(cached)); setUser(cachedUser)
+          const cachedConfig = JSON.parse(cached) as TripConfig
+          setConfig(cachedConfig); setActiveIndex(initialDayIndex(cachedConfig.days)); setUser(cachedUser)
           setExpenses(JSON.parse(localStorage.getItem('trip-offline-expenses') || '[]'))
           setExpensesLoaded(true); setOffline(true); setAuth('ready')
           return
@@ -74,6 +86,7 @@ function App() {
   async function loadConfig() {
     const result = await api<{ config: TripConfig }>('/api/trip/config')
     setConfig(result.config)
+    setActiveIndex(initialDayIndex(result.config.days))
     localStorage.setItem('trip-offline-config', JSON.stringify(result.config))
     setAuth('choose')
   }
@@ -221,7 +234,7 @@ function App() {
             type="button"
           >
             <span>{day.date}</span>
-            <small>{day.place}</small>
+            <small>{isToday(day.date) ? `今天 · ${day.place}` : day.place}</small>
           </button>
         ))}
       </nav>
