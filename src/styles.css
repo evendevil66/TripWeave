@@ -94,6 +94,8 @@ h1 em { color: var(--accent); font-style: normal; }
 .traffic-report strong { font-size: 12px; color: var(--green); }
 .traffic-report time { font-size: 11px; color: var(--muted); }
 .traffic-report p { margin: 5px 0 0; color: var(--ink); font-size: 12px; line-height: 1.65; }
+.traffic-report .cache-status { margin-top: 7px; color: var(--muted); font-size: 11px; }
+.traffic-report .cache-status-warning { color: var(--accent); }
 .ai-advice { margin-top: 11px; padding-top: 10px; border-top: 1px dashed var(--line); }
 .ai-advice strong { color: var(--accent); }
 .ai-advice p { margin-top: 5px; }

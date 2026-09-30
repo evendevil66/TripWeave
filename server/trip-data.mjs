@@ -82,6 +82,8 @@ async function database() {
         signature text NOT NULL,
         evidence jsonb,
         fetched_at timestamptz,
+        last_attempt_at timestamptz,
+        last_error text,
         advice jsonb,
         advice_at timestamptz,
         PRIMARY KEY (trip_id, day_index, leg_index)
@@ -99,6 +101,8 @@ async function database() {
     await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS ai_model text')
     await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS ai_refresh_minutes integer NOT NULL DEFAULT 10')
     await pool.query('ALTER TABLE app_installation ADD COLUMN IF NOT EXISTS ai_auto_enabled boolean NOT NULL DEFAULT true')
+    await pool.query('ALTER TABLE trip_route_cache ADD COLUMN IF NOT EXISTS last_attempt_at timestamptz')
+    await pool.query('ALTER TABLE trip_route_cache ADD COLUMN IF NOT EXISTS last_error text')
     await pool.query('ALTER TABLE trip_expenses DROP CONSTRAINT IF EXISTS trip_expenses_payer_check')
   })().catch((error) => { ready = undefined; throw error })
   await ready
@@ -420,15 +424,22 @@ export async function refreshTrafficCache({ force = false, target } = {}) {
           const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
           if (!response.ok) throw new Error(`高德请求失败：${response.status}`)
           const evidence = webServiceEvidence(await response.json(), leg.label, new Date().toISOString())
-          const result = await db.query(`INSERT INTO trip_route_cache (trip_id, day_index, leg_index, signature, evidence, fetched_at)
-            VALUES ($1, $2, $3, $4, $5, now())
+          const result = await db.query(`INSERT INTO trip_route_cache (trip_id, day_index, leg_index, signature, evidence, fetched_at, last_attempt_at, last_error)
+            VALUES ($1, $2, $3, $4, $5, now(), now(), NULL)
             ON CONFLICT (trip_id, day_index, leg_index) DO UPDATE SET signature = EXCLUDED.signature,
               evidence = EXCLUDED.evidence, fetched_at = EXCLUDED.fetched_at,
+              last_attempt_at = EXCLUDED.last_attempt_at, last_error = NULL,
               advice = CASE WHEN trip_route_cache.signature = EXCLUDED.signature THEN trip_route_cache.advice ELSE NULL END,
               advice_at = CASE WHEN trip_route_cache.signature = EXCLUDED.signature THEN trip_route_cache.advice_at ELSE NULL END
             RETURNING *`, [tripId, dayIndex, legIndex, signature, evidence])
           current = result.rows[0]
-        } catch (error) { console.error(`Traffic refresh failed for day ${dayIndex + 1} leg ${legIndex + 1}:`, error.message) }
+        } catch (error) {
+          console.error(`Traffic refresh failed for day ${dayIndex + 1} leg ${legIndex + 1}:`, error.message)
+          await db.query(`INSERT INTO trip_route_cache (trip_id, day_index, leg_index, signature, last_attempt_at, last_error)
+            VALUES ($1, $2, $3, $4, now(), '高德路线暂不可用')
+            ON CONFLICT (trip_id, day_index, leg_index) DO UPDATE SET last_attempt_at = now(), last_error = EXCLUDED.last_error`,
+          [tripId, dayIndex, legIndex, signature])
+        }
       }
       const evidenceFresh = current?.fetched_at && Date.now() - new Date(current.fetched_at).getTime() <= (installed.traffic_refresh_minutes + 1) * 60_000
       if (current?.signature !== signature || !current?.evidence || !evidenceFresh || !aiSettings(installed).key || !aiSettings(installed).url || !aiSettings(installed).model) continue
@@ -704,9 +715,9 @@ export async function handleTripData(request, response) {
       const configured = !!(installed.amap_web_service_key || process.env.AMAP_WEB_SERVICE_KEY)
       if (request.method === 'POST' && configured) await refreshTrafficCache({ force: true, target: { dayIndex, legIndex } })
       const db = await database()
-      const row = (await db.query('SELECT signature, evidence, fetched_at, advice, advice_at FROM trip_route_cache WHERE trip_id = $1 AND day_index = $2 AND leg_index = $3', [tripId, dayIndex, legIndex])).rows[0]
+      const row = (await db.query('SELECT signature, evidence, fetched_at, last_attempt_at, last_error, advice, advice_at FROM trip_route_cache WHERE trip_id = $1 AND day_index = $2 AND leg_index = $3', [tripId, dayIndex, legIndex])).rows[0]
       const valid = row?.signature === legSignature(leg)
-      send(response, 200, { configured, evidence: valid ? row.evidence : null, fetchedAt: valid ? row.fetched_at : null, advice: valid ? row.advice : null, adviceAt: valid ? row.advice_at : null, trafficRefreshMinutes: installed.traffic_refresh_minutes, aiRefreshMinutes: installed.ai_refresh_minutes, trafficAutoEnabled: installed.traffic_auto_enabled, aiAutoEnabled: installed.ai_auto_enabled })
+      send(response, 200, { configured, evidence: valid ? row.evidence : null, fetchedAt: valid ? row.fetched_at : null, lastAttemptAt: valid ? row.last_attempt_at : null, lastError: valid ? row.last_error : null, advice: valid ? row.advice : null, adviceAt: valid ? row.advice_at : null, trafficRefreshMinutes: installed.traffic_refresh_minutes, aiRefreshMinutes: installed.ai_refresh_minutes, trafficAutoEnabled: installed.traffic_auto_enabled, aiAutoEnabled: installed.ai_auto_enabled })
       return true
     }
     if (path === '/api/trip/traffic-advice' && request.method === 'POST') {

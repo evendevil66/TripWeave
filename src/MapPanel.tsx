@@ -10,7 +10,7 @@ type RouteOption = { route: Route; waypoint?: [number, number] }
 type RouteEvidence = { distance: number; time: number; covered: number; mainRoads: string[]; traffic: { status: string; distance: number }[]; roads: { road: string; status: string; distance: number }[] }
 type DrivingResult = { routes?: Route[]; info?: string; [key: string]: unknown }
 type Advice = { advice: string; updatedAt: string; sourceAt: string; source?: 'web-service' | 'js-api' }
-type RouteCache = { configured: boolean; evidence: { routes: RouteEvidence[] } | null; fetchedAt: string | null; advice: Advice | null; trafficRefreshMinutes: number; aiRefreshMinutes: number; trafficAutoEnabled: boolean; aiAutoEnabled: boolean }
+type RouteCache = { configured: boolean; evidence: { routes: RouteEvidence[] } | null; fetchedAt: string | null; lastAttemptAt: string | null; lastError: string | null; advice: Advice | null; trafficRefreshMinutes: number; aiRefreshMinutes: number; trafficAutoEnabled: boolean; aiAutoEnabled: boolean }
 type Props = { dayIndex: number; legIndex: number; origin: string; destination: string; originPoint: [number, number]; destinationPoint: [number, number]; routeLabel: string; position?: Position }
 type RouteMapProps = Props & { active: boolean; currentPosition?: Position; fromCurrent: boolean; onOriginChange: (value: boolean) => void }
 
@@ -56,6 +56,17 @@ function cachedTrafficSummary(evidence: RouteEvidence) {
   const coverage = evidence.distance > 0 ? Math.min(100, Math.round(evidence.covered / evidence.distance * 100)) : 0
   const parts = evidence.traffic.map(({ status, distance }) => `${status}约 ${(distance / 1000).toFixed(1)} 公里`).join('、')
   return `高德标注路段约 ${(evidence.covered / 1000).toFixed(1)} 公里（路线约 ${coverage}%）：${parts}。${coverage < 90 ? '其余路段没有可判断的分段数据。' : ''}`
+}
+
+function cacheStatus(cache: RouteCache) {
+  if (!cache.configured) return ''
+  const schedule = cache.trafficAutoEnabled ? `后台每 ${cache.trafficRefreshMinutes} 分钟更新` : '后台自动更新已关闭'
+  if (!cache.fetchedAt) return `后台路况尚无成功缓存${cache.lastError ? '；最近一次更新失败' : ''} · ${schedule}`
+  const ageMinutes = Math.max(0, Math.floor((Date.now() - Date.parse(cache.fetchedAt)) / 60_000))
+  const updated = new Date(cache.fetchedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  const age = ageMinutes < 1 ? '刚刚' : ageMinutes < 60 ? `${ageMinutes} 分钟前` : `${Math.floor(ageMinutes / 60)} 小时 ${ageMinutes % 60} 分钟前`
+  const stale = cache.trafficAutoEnabled && ageMinutes > cache.trafficRefreshMinutes * 2
+  return `后台路况缓存：${updated}（${age}） · ${schedule}${cache.lastError ? ' · 最近一次更新失败，显示上次缓存' : stale ? ' · 缓存已过期，请以地图实时路线为准' : ''}`
 }
 
 function readableAdvice(value: string) {
@@ -357,6 +368,7 @@ function RouteMap({ dayIndex, legIndex, originPoint, destinationPoint, routeLabe
           </div>
         </div>
         <p>{route ? trafficSummary(route) : serverCache?.evidence?.routes[0] ? cachedTrafficSummary(serverCache.evidence.routes[0]) : state}</p>
+        {serverCache?.configured && !currentPosition && <p className={`cache-status ${serverCache.lastError ? 'cache-status-warning' : ''}`}>{cacheStatus(serverCache)}</p>}
         <div className="ai-advice">
           <div><strong>AI 建议</strong>{aiAdvice && <time dateTime={aiAdvice.updatedAt}>{new Date(aiAdvice.updatedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} 更新</time>}</div>
           <p>{aiAdvice ? readableAdvice(aiAdvice.advice) : aiLoading ? '正在根据最新路况分析…' : '等待高德路线数据…'}</p>
