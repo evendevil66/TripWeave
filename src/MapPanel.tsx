@@ -59,13 +59,15 @@ function cachedTrafficSummary(evidence: RouteEvidence) {
 }
 
 function readableAdvice(value: string) {
+  const formatMinutes = (count: string) => {
+    const minutes = Math.round(Number(count))
+    return minutes >= 60 ? `${Math.floor(minutes / 60)}小时${minutes % 60}分钟` : `${minutes}分钟`
+  }
   return value
     .replace(/(\d+(?:\.\d+)?)\s*米/g, (_, count: string) => `${(Number(count) / 1000).toFixed(1)}公里`)
     .replace(/(\d+(?:\.\d+)?)\s*秒/g, (_, count: string) => `${Math.round(Number(count) / 60)}分钟`)
-    .replace(/(\d+(?:\.\d+)?)\s*分钟/g, (_, count: string) => {
-      const minutes = Math.round(Number(count))
-      return minutes >= 60 ? `${Math.floor(minutes / 60)}小时${minutes % 60}分钟` : `${minutes}分钟`
-    })
+    .replace(/(\d+(?:\.\d+)?)\s*(至|到|[~～-])\s*(\d+(?:\.\d+)?)\s*分钟/g, (_, start: string, separator: string, end: string) => `${formatMinutes(start)}${separator}${formatMinutes(end)}`)
+    .replace(/(\d+(?:\.\d+)?)\s*分钟/g, (_, count: string) => formatMinutes(count))
 }
 
 function routeDuration(seconds: number) {
